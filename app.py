@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 # Flask API URL (update with your Flask Render URL after deployment)
-FLASK_API_URL = "https://flask-vitals.onrender.com"  # Replace with your Flask URL after deployment
+FLASK_API_URL = "https://flask-vitals.onrender.com/"  # Replace with your Flask URL after deployment
 
 # Constants
 ALERTS_FILE = "alerts.csv"
