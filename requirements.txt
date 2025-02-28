@@ -2,5 +2,4 @@ streamlit
 pandas
 matplotlib
 requests
-gspread
-oauth2client
+firebase-admin
