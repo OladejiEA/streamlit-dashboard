@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 import requests
 import io
+import time
 
 # Page configuration
 st.set_page_config(
@@ -179,3 +180,7 @@ elif page == "Data Download":
             file_name="patient_vitals.csv",
             mime="text/csv"
         )
+# --- Auto Refresh Functionality ---
+while True:
+    time.sleep(10)
+    st.rerun()
