@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
 import requests
-import io
+import os
 
 # Page configuration
 st.set_page_config(
@@ -12,8 +12,8 @@ st.set_page_config(
     layout="wide"
 )
 
-# Flask API URL
-FLASK_API_URL = "https://flask-vitals.onrender.com"  # Confirmed correct
+# Flask API URL (update with your Flask Render URL after deployment)
+FLASK_API_URL = "https://flask-vitals.onrender.com"  # Replace with your Flask URL after deployment
 
 # Constants
 ALERTS_FILE = "alerts.csv"
@@ -26,10 +26,8 @@ if "alerts_viewed" not in st.session_state:
 def load_data():
     try:
         response = requests.get(f"{FLASK_API_URL}/vitals")
-        st.write(f"Response status: {response.status_code}")  # Debug
-        st.write(f"Response content: {response.text[:100]}")  # Debug first 100 chars
         if response.status_code == 200:
-            df = pd.read_csv(io.StringIO(response.text))  # Fix: Use StringIO for CSV string
+            df = pd.read_csv(response.text.splitlines())
             return df
         else:
             return pd.DataFrame(columns=["Timestamp", "Temperature", "Blood Oxygen", "Heart Rate", "Respiration Rate", "Blood Pressure"])
@@ -37,7 +35,7 @@ def load_data():
         st.error(f"Error fetching data: {e}")
         return pd.DataFrame(columns=["Timestamp", "Temperature", "Blood Oxygen", "Heart Rate", "Respiration Rate", "Blood Pressure"])
 
-# Load and save alerts
+# Load and save alerts (local to Streamlit for now)
 def load_alerts():
     if os.path.exists(ALERTS_FILE):
         return pd.read_csv(ALERTS_FILE)
@@ -149,6 +147,7 @@ elif page == "BP Measurement":
         new_entry = pd.DataFrame([[datetime.now().isoformat(), None, None, None, None, f"{systolic}/{diastolic}"]],
                                  columns=df.columns)
         df = pd.concat([df, new_entry], ignore_index=True)
+        # Note: This only saves locally; to persist, you'd need to POST to Flask (future enhancement)
         st.success("Blood Pressure measurement saved locally (not synced to Flask yet).")
 
     df = load_data()
