@@ -19,6 +19,7 @@ FLASK_API_URL = "https://flask-vitals.onrender.com"  # Adjust if Render URL diff
 
 # Constants
 ALERTS_FILE = "alerts.csv"
+CONNECTION_THRESHOLD = 20  # Seconds to consider hardware disconnected (2x ESP32 interval)
 
 # Initialize session state
 if "alerts_viewed" not in st.session_state:
@@ -27,7 +28,7 @@ if "alerts_viewed" not in st.session_state:
 # Load data from Flask API (CSV)
 def load_data():
     try:
-        response = requests.get(f"{FLASK_API_URL}/vitals")
+        response = requests.get(f"{FLASK_API_URL}/vitals", headers={"Cache-Control": "no-cache"})
         if response.status_code == 200:
             df = pd.read_csv(io.StringIO(response.text))
             df["Timestamp"] = pd.to_datetime(df["Timestamp"])
@@ -42,6 +43,15 @@ def load_data():
     except Exception as e:
         st.error(f"Error fetching data from Flask: {e}")
         return pd.DataFrame(columns=["Timestamp", "Temperature", "Blood Oxygen", "Heart Rate", "Respiration Rate", "Blood Pressure"])
+
+# Check hardware connection status
+def is_hardware_connected(df):
+    if df.empty:
+        return False
+    latest_timestamp = df["Timestamp"].iloc[-1]
+    current_time = datetime.now(latest_timestamp.tzinfo)  # Match timezone if present
+    time_diff = (current_time - latest_timestamp).total_seconds()
+    return time_diff <= CONNECTION_THRESHOLD
 
 # Load and save alerts
 def load_alerts():
@@ -63,10 +73,17 @@ alerts_df = load_alerts()
 if not alerts_df.empty and not st.session_state.alerts_viewed:
     st.sidebar.markdown("🔴 **Active Alerts!**")
 
-# Home page
+# Home page with auto-refresh
 if page == "Home":
     st.title("Patient Vital Signs")
     df = load_data()
+
+    # Hardware connection status
+    if is_hardware_connected(df):
+        st.markdown('<p style="background-color: #00FF00; padding: 10px; border-radius: 5px; text-align: center;">Device Connected</p>', unsafe_allow_html=True)
+    else:
+        st.markdown('<p style="background-color: #FF0000; padding: 10px; border-radius: 5px; text-align: center;">Device Disconnected</p>', unsafe_allow_html=True)
+
     if df.empty:
         st.warning("No data available.")
     else:
@@ -125,6 +142,10 @@ if page == "Home":
             ax.grid(True)
             st.pyplot(fig)
 
+    # Auto-refresh every 10 seconds on Home page only
+    time.sleep(10)
+    st.rerun()
+
 elif page == "Alerts":
     st.title("Alerts & Notifications")
     st.session_state.alerts_viewed = True
@@ -180,7 +201,3 @@ elif page == "Data Download":
             file_name="patient_vitals.csv",
             mime="text/csv"
         )
-# --- Auto Refresh Functionality ---
-while True:
-    time.sleep(10)
-    st.rerun()
