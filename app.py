@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import firebase_admin
+from firebase_admin import credentials, firestore
 import os
 import requests
 
@@ -14,41 +14,43 @@ st.set_page_config(
     layout="wide"
 )
 
-# Google Sheets setup
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+# Firebase setup
 CREDS_FILE = "credentials.json"
-SPREADSHEET_NAME = "PatientVitals"
-
-# Initialize Google Sheets client
-creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-client = gspread.authorize(creds)
-sheet = client.open(SPREADSHEET_NAME).sheet1
+if not firebase_admin._apps:  # Prevent re-initialization
+    cred = credentials.Certificate(CREDS_FILE)
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
+vitals_ref = db.collection('vitals')
 
 # Constants
 ALERTS_FILE = "alerts.csv"
-FLASK_API_URL = "https://flask-vitals.onrender.com"  # For BP POSTs
+FLASK_API_URL = "https://flask-vitals.onrender.com"
 
 # Initialize session state
 if "alerts_viewed" not in st.session_state:
     st.session_state.alerts_viewed = False
 
-# Load data from Google Sheets
+# Load data from Firestore
 def load_data():
     try:
-        all_data = sheet.get_all_values()
-        if not all_data or len(all_data) <= 1:
-            st.warning("No data available in Google Sheets.")
+        docs = vitals_ref.order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
+        data = [doc.to_dict() for doc in docs]
+        if not data:
+            st.warning("No data available in Firestore.")
             return pd.DataFrame(columns=["Timestamp", "Temperature", "Blood Oxygen", "Heart Rate", "Respiration Rate", "Blood Pressure"])
         
-        df = pd.DataFrame(all_data[1:], columns=all_data[0])
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"])
-        df["Temperature"] = pd.to_numeric(df["Temperature"], errors='coerce')
-        df["Blood Oxygen"] = pd.to_numeric(df["Blood Oxygen"], errors='coerce')
-        df["Heart Rate"] = pd.to_numeric(df["Heart Rate"], errors='coerce')
-        df["Respiration Rate"] = pd.to_numeric(df["Respiration Rate"], errors='coerce')
+        df = pd.DataFrame(data)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["temperature"] = pd.to_numeric(df["temperature"], errors='coerce')
+        df["blood_oxygen"] = pd.to_numeric(df["blood_oxygen"], errors='coerce')
+        df["heart_rate"] = pd.to_numeric(df["heart_rate"], errors='coerce')
+        df["respiration_rate"] = pd.to_numeric(df["respiration_rate"], errors='coerce')
+        df.rename(columns={"timestamp": "Timestamp", "temperature": "Temperature", 
+                          "blood_oxygen": "Blood Oxygen", "heart_rate": "Heart Rate", 
+                          "respiration_rate": "Respiration Rate", "blood_pressure": "Blood Pressure"}, inplace=True)
         return df
     except Exception as e:
-        st.error(f"Error fetching data from Google Sheets: {e}")
+        st.error(f"Error fetching data from Firestore: {e}")
         return pd.DataFrame(columns=["Timestamp", "Temperature", "Blood Oxygen", "Heart Rate", "Respiration Rate", "Blood Pressure"])
 
 # Load and save alerts
@@ -165,7 +167,7 @@ elif page == "BP Measurement":
         try:
             response = requests.post(f"{FLASK_API_URL}/data", json=payload)
             if response.status_code == 200:
-                st.success("Blood Pressure measurement saved to Google Sheets!")
+                st.success("Blood Pressure measurement saved to Firestore!")
             else:
                 st.error(f"Failed to save BP: {response.text}")
         except Exception as e:
