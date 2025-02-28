@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
+import firebase_admin
+from firebase_admin import credentials, firestore
 import os
 import requests
-import io
 import time
 
 # Page configuration
@@ -14,44 +15,44 @@ st.set_page_config(
     layout="wide"
 )
 
-# Flask API URL
-FLASK_API_URL = "https://flask-vitals.onrender.com"  # Adjust if Render URL differs
+# Firebase setup
+CREDS_FILE = "credentials.json"
+if not firebase_admin._apps:  # Prevent re-initialization
+    cred = credentials.Certificate(CREDS_FILE)
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
+vitals_ref = db.collection('vitals')
 
 # Constants
 ALERTS_FILE = "alerts.csv"
-CONNECTION_THRESHOLD = 20  # Seconds to consider hardware disconnected (2x ESP32 interval)
+FLASK_API_URL = "https://flask-vitals.onrender.com"
 
 # Initialize session state
 if "alerts_viewed" not in st.session_state:
     st.session_state.alerts_viewed = False
 
-# Load data from Flask API (CSV)
+# Load data from Firestore
 def load_data():
     try:
-        response = requests.get(f"{FLASK_API_URL}/vitals", headers={"Cache-Control": "no-cache"})
-        if response.status_code == 200:
-            df = pd.read_csv(io.StringIO(response.text))
-            df["Timestamp"] = pd.to_datetime(df["Timestamp"])
-            df["Temperature"] = pd.to_numeric(df["Temperature"], errors='coerce')
-            df["Blood Oxygen"] = pd.to_numeric(df["Blood Oxygen"], errors='coerce')
-            df["Heart Rate"] = pd.to_numeric(df["Heart Rate"], errors='coerce')
-            df["Respiration Rate"] = pd.to_numeric(df["Respiration Rate"], errors='coerce')
-            return df
-        else:
-            st.warning("No data available from Flask.")
+        docs = vitals_ref.order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
+        data = [doc.to_dict() for doc in docs]
+        if not data:
+            st.warning("No data available in Firestore.")
             return pd.DataFrame(columns=["Timestamp", "Temperature", "Blood Oxygen", "Heart Rate", "Respiration Rate", "Blood Pressure"])
+        
+        df = pd.DataFrame(data)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["temperature"] = pd.to_numeric(df["temperature"], errors='coerce')
+        df["blood_oxygen"] = pd.to_numeric(df["blood_oxygen"], errors='coerce')
+        df["heart_rate"] = pd.to_numeric(df["heart_rate"], errors='coerce')
+        df["respiration_rate"] = pd.to_numeric(df["respiration_rate"], errors='coerce')
+        df.rename(columns={"timestamp": "Timestamp", "temperature": "Temperature", 
+                          "blood_oxygen": "Blood Oxygen", "heart_rate": "Heart Rate", 
+                          "respiration_rate": "Respiration Rate", "blood_pressure": "Blood Pressure"}, inplace=True)
+        return df
     except Exception as e:
-        st.error(f"Error fetching data from Flask: {e}")
+        st.error(f"Error fetching data from Firestore: {e}")
         return pd.DataFrame(columns=["Timestamp", "Temperature", "Blood Oxygen", "Heart Rate", "Respiration Rate", "Blood Pressure"])
-
-# Check hardware connection status
-def is_hardware_connected(df):
-    if df.empty:
-        return False
-    latest_timestamp = df["Timestamp"].iloc[-1]
-    current_time = datetime.now(latest_timestamp.tzinfo)  # Match timezone if present
-    time_diff = (current_time - latest_timestamp).total_seconds()
-    return time_diff <= CONNECTION_THRESHOLD
 
 # Load and save alerts
 def load_alerts():
@@ -73,17 +74,10 @@ alerts_df = load_alerts()
 if not alerts_df.empty and not st.session_state.alerts_viewed:
     st.sidebar.markdown("🔴 **Active Alerts!**")
 
-# Home page with auto-refresh
+# Home page
 if page == "Home":
     st.title("Patient Vital Signs")
     df = load_data()
-
-    # Hardware connection status
-    if is_hardware_connected(df):
-        st.markdown('<p style="background-color: #00FF00; padding: 10px; border-radius: 5px; text-align: center;">Device Connected</p>', unsafe_allow_html=True)
-    else:
-        st.markdown('<p style="background-color: #FF0000; padding: 10px; border-radius: 5px; text-align: center;">Device Disconnected</p>', unsafe_allow_html=True)
-
     if df.empty:
         st.warning("No data available.")
     else:
@@ -142,10 +136,6 @@ if page == "Home":
             ax.grid(True)
             st.pyplot(fig)
 
-    # Auto-refresh every 10 seconds on Home page only
-    time.sleep(10)
-    st.rerun()
-
 elif page == "Alerts":
     st.title("Alerts & Notifications")
     st.session_state.alerts_viewed = True
@@ -178,7 +168,7 @@ elif page == "BP Measurement":
         try:
             response = requests.post(f"{FLASK_API_URL}/data", json=payload)
             if response.status_code == 200:
-                st.success("Blood Pressure measurement saved!")
+                st.success("Blood Pressure measurement saved to Firestore!")
             else:
                 st.error(f"Failed to save BP: {response.text}")
         except Exception as e:
@@ -201,3 +191,7 @@ elif page == "Data Download":
             file_name="patient_vitals.csv",
             mime="text/csv"
         )
+# --- Auto Refresh Functionality ---
+while True:
+    time.sleep(10)
+    st.rerun()
