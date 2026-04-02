@@ -12,11 +12,55 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime
-import io, time, base64
+import io, time, base64, json
 import requests
+from streamlit_cookies_controller import CookieController
 
 st.set_page_config(page_title="VitaTrack", page_icon="🩺",
                    layout="wide", initial_sidebar_state="expanded")
+
+# ─── Cookie-based session persistence ────────────────────────────────────────────
+# CookieController must be instantiated ONCE at the very top, before any st.* calls
+_cookies = CookieController()
+
+COOKIE_NAME = "vitatrack_session"
+
+def save_session_cookie(user: dict):
+    """Persist the user dict in a browser cookie (7-day expiry)."""
+    payload = json.dumps(user)
+    _cookies.set(COOKIE_NAME, payload)
+
+def clear_session_cookie():
+    """Delete the session cookie on sign-out."""
+    _cookies.remove(COOKIE_NAME)
+
+def restore_session_from_cookie():
+    """
+    Called once per page load (including refresh).
+    If a valid cookie exists and the session is not already active,
+    re-authenticate silently via the Flask /auth/verify endpoint.
+    Returns the restored user dict or None.
+    """
+    if st.session_state.get("logged_in"):
+        return None                          # already logged in, nothing to do
+    raw = _cookies.get(COOKIE_NAME)
+    if not raw:
+        return None
+    try:
+        user = json.loads(raw)
+        # Quick server-side verification so a stale/tampered cookie doesn't work
+        r = requests.post(
+            f"{FLASK_API_URL}/auth/verify",
+            json={"user_id": user.get("id")},
+            timeout=6
+        )
+        if r and r.status_code == 200:
+            return r.json().get("user")
+    except Exception:
+        pass
+    # Cookie invalid/expired — remove it
+    clear_session_cookie()
+    return None
 
 FLASK_API_URL    = "https://flask-vitals.onrender.com"
 REFRESH_INTERVAL = 10
@@ -101,9 +145,20 @@ def play_beep():
     st.components.v1.html(BEEP_JS, height=0)
 
 for k,v in {"logged_in":False,"user":None,"auth_page":"login",
-             "last_alert_count":0,"flash_active":False,"nav_page":None}.items():
+             "last_alert_count":0,"flash_active":False,"nav_page":None,
+             "_session_restored":False}.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+# ── Restore session from cookie on every page load (survives browser refresh) ────
+if not st.session_state._session_restored:
+    st.session_state._session_restored = True
+    restored = restore_session_from_cookie()
+    if restored:
+        st.session_state.logged_in = True
+        st.session_state.user      = restored
+        st.session_state.nav_page  = allowed_pages(restored)[0]
+        st.rerun()
 
 def api(method, path, **kw):
     try:
@@ -204,6 +259,7 @@ def render_login():
                         st.session_state.logged_in = True
                         st.session_state.user      = user
                         st.session_state.nav_page  = allowed_pages(user)[0]
+                        save_session_cookie(user)
                         st.rerun()
                     else:
                         st.error(r.json().get("error","Login failed."))
@@ -293,6 +349,7 @@ def render_sidebar(pages, active_count):
                     unsafe_allow_html=True)
         st.markdown("")
         if st.button("Sign Out", use_container_width=True):
+            clear_session_cookie()
             for k in list(st.session_state.keys()): del st.session_state[k]
             st.rerun()
     return page
