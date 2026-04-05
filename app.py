@@ -255,14 +255,20 @@ def render_login():
                     if r is None:
                         st.error("Could not reach server.")
                     elif r.status_code == 200:
-                        user = r.json()["user"]
-                        st.session_state.logged_in = True
-                        st.session_state.user      = user
-                        st.session_state.nav_page  = allowed_pages(user)[0]
-                        save_session_cookie(user)
-                        st.rerun()
+                        try:
+                            user = r.json()["user"]
+                            st.session_state.logged_in = True
+                            st.session_state.user      = user
+                            st.session_state.nav_page  = allowed_pages(user)[0]
+                            save_session_cookie(user)
+                            st.rerun()
+                        except Exception:
+                            st.error(f"Unexpected server response: {r.text[:200]}")
                     else:
-                        st.error(r.json().get("error","Login failed."))
+                        try:
+                            st.error(r.json().get("error", "Login failed."))
+                        except Exception:
+                            st.error(f"Server error ({r.status_code}): {r.text[:200]}")
             st.markdown("<hr style='margin:14px 0'>", unsafe_allow_html=True)
             st.markdown("<div style='text-align:center;font-size:14px;color:#64748b'>New staff member?</div>",
                         unsafe_allow_html=True)
@@ -321,7 +327,10 @@ def render_signup():
                         time.sleep(2)
                         st.session_state.auth_page = "login"; st.rerun()
                     else:
-                        st.error(r.json().get("error","Signup failed."))
+                        try:
+                            st.error(r.json().get("error", "Signup failed."))
+                        except Exception:
+                            st.error(f"Server error ({r.status_code}): {r.text[:200]}")
             st.markdown("<hr style='margin:14px 0'>", unsafe_allow_html=True)
             if st.button("Back to Sign In", use_container_width=True):
                 st.session_state.auth_page = "login"; st.rerun()
