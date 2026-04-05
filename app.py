@@ -67,15 +67,15 @@ REFRESH_INTERVAL = 10
 POSTS = ["Doctor","Nurse","Paramedic","Lab Technician","Physiotherapist","Other"]
 
 ROLE_PAGES = {
-    "developer":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","👥 Admin Panel"],
-    "admin":           ["👥 Admin Panel"],
-    "doctor":          ["🏠 Home","🔔 Alerts","📥 Data Download"],
-    "nurse":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download"],
-    "paramedic":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download"],
-    "lab technician":  ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download"],
-    "physiotherapist": ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download"],
-    "other":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download"],
-    "staff":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download"],
+    "developer":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","👥 Admin Panel","⚙️ My Profile"],
+    "admin":           ["👥 Admin Panel","⚙️ My Profile"],
+    "doctor":          ["🏠 Home","🔔 Alerts","📥 Data Download","⚙️ My Profile"],
+    "nurse":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
+    "paramedic":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
+    "lab technician":  ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
+    "physiotherapist": ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
+    "other":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
+    "staff":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
 }
 
 def allowed_pages(user):
@@ -632,14 +632,19 @@ def page_admin():
                 with ph1:
                     dev_tag = (f'<span class="pill pill-green">📡 {pat["device_id"]}</span>'
                                if pat.get("device_id") else '<span class="pill pill-yellow">No device</span>')
-                    assigned_names = [staff_map[i] for i in pat.get("assigned_to",[]) if i in staff_map]
+                    # assigned_to may be a list of dicts {id, full_name} OR plain strings
+                    raw_assigned = pat.get("assigned_to", [])
+                    assigned_ids   = [a["id"] if isinstance(a, dict) else a for a in raw_assigned]
+                    assigned_names = [a["full_name"] if isinstance(a, dict) else staff_map.get(a, "")
+                                      for a in raw_assigned]
+                    assigned_names = [n for n in assigned_names if n]
                     st.markdown(f"""<div class="patient-name">{pat['name']}</div>
                     <div class="patient-meta">{pat.get('age','—')} yrs · {pat.get('gender','—')}
                         · {pat.get('diagnosis','—')} &nbsp;{dev_tag}</div>""", unsafe_allow_html=True)
                     if pat.get("notes"): st.caption(f"📝 {pat['notes']}")
                     if assigned_names:   st.caption(f"👩‍⚕️ Assigned: {', '.join(assigned_names)}")
                 with ph2:
-                    defaults = [n for n,uid in staff_opt.items() if uid in pat.get("assigned_to",[])]
+                    defaults = [n for n, uid in staff_opt.items() if uid in assigned_ids]
                     sel = st.multiselect("Assign staff", list(staff_opt.keys()),
                                          default=defaults, key=f"ms_{pat['id']}")
                     if st.button("Save", key=f"sv_{pat['id']}", use_container_width=True):
@@ -703,6 +708,123 @@ def page_admin():
                         else:
                             st.info("Select a patient first.")
 
+
+def page_profile():
+    user = st.session_state.user
+    st.markdown("""
+    <div class="header-bar">
+        <div class="header-logo">⚙️</div>
+        <div><div class="header-title">My Profile</div>
+        <div class="header-sub">Update your password and profile photo</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    col_photo, col_details = st.columns([1, 2])
+
+    # ── Current photo ─────────────────────────────────────────────────────────
+    with col_photo:
+        st.markdown("#### Current Photo")
+        ph = get_photo_html(user["id"], 120, "#3b82f6", user["full_name"])
+        st.markdown(f'<div style="text-align:center;margin-bottom:16px">{ph}</div>',
+                    unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="text-align:center">
+            <div style="font-size:16px;font-weight:700;color:#0f172a">{user['full_name']}</div>
+            <div style="font-size:13px;color:#64748b;margin-top:2px">{user['post']}</div>
+            <div style="font-size:12px;color:#94a3b8;margin-top:2px">{user['email']}</div>
+        </div>""", unsafe_allow_html=True)
+
+    # ── Change photo ──────────────────────────────────────────────────────────
+    with col_details:
+        with st.container(border=True):
+            st.markdown("#### 📷 Change Profile Photo")
+            new_photo = st.file_uploader("Upload new passport-style photo",
+                                          type=["jpg","jpeg","png"],
+                                          label_visibility="collapsed")
+            if new_photo:
+                raw = new_photo.read()
+                b64p = base64.b64encode(raw).decode()
+                st.markdown(f"""
+                <div style="text-align:center;margin:8px 0">
+                    <img src="data:image/jpeg;base64,{b64p}"
+                         style="width:100px;height:100px;border-radius:12px;
+                                object-fit:cover;border:3px solid #3b82f6"/>
+                    <div style="font-size:12px;color:#16a34a;margin-top:4px">✓ New photo ready</div>
+                </div>""", unsafe_allow_html=True)
+                new_photo.seek(0)
+
+                if st.button("💾 Save New Photo", use_container_width=True, type="primary"):
+                    photo_b64 = base64.b64encode(new_photo.read()).decode()
+                    r = api("POST", "/profile/change_photo",
+                            json={"user_id": user["id"], "photo_b64": photo_b64})
+                    if r and r.status_code == 200:
+                        st.success("✅ Profile photo updated! It will appear on your next login.")
+                    else:
+                        try:
+                            st.error(r.json().get("error", "Failed to update photo."))
+                        except Exception:
+                            st.error("Failed to update photo.")
+
+        st.markdown("")
+
+        with st.container(border=True):
+            st.markdown("#### 🔒 Change Password")
+            current_pw = st.text_input("Current Password", type="password",
+                                        key="cp_current")
+            new_pw     = st.text_input("New Password", type="password",
+                                        key="cp_new")
+            confirm_pw = st.text_input("Confirm New Password", type="password",
+                                        key="cp_confirm")
+
+            # Live strength indicator
+            if new_pw:
+                strength = 0
+                tips = []
+                if len(new_pw) >= 8:  strength += 1
+                else: tips.append("at least 8 characters")
+                if any(c.isupper() for c in new_pw): strength += 1
+                else: tips.append("an uppercase letter")
+                if any(c.isdigit() for c in new_pw): strength += 1
+                else: tips.append("a number")
+                if any(c in "!@#$%^&*" for c in new_pw): strength += 1
+                else: tips.append("a special character (!@#$%^&*)")
+
+                bar_colors = ["#ef4444","#f59e0b","#3b82f6","#16a34a"]
+                labels     = ["Weak","Fair","Good","Strong"]
+                w = strength * 25
+                st.markdown(f"""
+                <div style="margin:8px 0">
+                    <div style="background:#f1f5f9;border-radius:4px;height:6px;overflow:hidden">
+                        <div style="width:{w}%;height:100%;background:{bar_colors[strength-1]};
+                             border-radius:4px;transition:width .3s"></div>
+                    </div>
+                    <div style="font-size:12px;color:{bar_colors[strength-1]};
+                         font-weight:600;margin-top:4px">{labels[strength-1]}
+                         {"" if not tips else " — add: " + ", ".join(tips)}
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+            if st.button("🔒 Update Password", use_container_width=True, type="primary"):
+                if not all([current_pw, new_pw, confirm_pw]):
+                    st.error("Please fill in all password fields.")
+                elif new_pw != confirm_pw:
+                    st.error("New passwords do not match.")
+                elif len(new_pw) < 6:
+                    st.error("New password must be at least 6 characters.")
+                else:
+                    r = api("POST", "/profile/change_password", json={
+                        "user_id":          user["id"],
+                        "current_password": current_pw,
+                        "new_password":     new_pw
+                    })
+                    if r and r.status_code == 200:
+                        st.success("✅ Password updated successfully!")
+                    else:
+                        try:
+                            st.error(r.json().get("error", "Failed to update password."))
+                        except Exception:
+                            st.error("Failed to update password.")
+
+
 # ── Router ───────────────────────────────────────────────────────────────────────
 if not st.session_state.logged_in:
     if st.session_state.auth_page == "login": render_login()
@@ -722,3 +844,4 @@ else:
     elif page == "💉 BP Measurement": page_bp()
     elif page == "📥 Data Download":  page_download()
     elif page == "👥 Admin Panel":    page_admin()
+    elif page == "⚙️ My Profile":    page_profile()
