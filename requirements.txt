@@ -1,7 +1,7 @@
-flask
-psycopg2-binary
 streamlit
-streamlit-cookies-controller
+firebase-admin
+pyrebase4
 pandas
 matplotlib
 requests
+streamlit-cookies-controller
