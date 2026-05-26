@@ -724,7 +724,65 @@ def page_admin():
                         if cur_pid and cur_pid != new_pid: db_update(f"/vitatrack/patients/{cur_pid}", {"device_id":""})
                         st.success("Assigned!"); st.rerun()
 
+def render_sidebar(pages):
+    with st.sidebar:
+        user = st.session_state.user
+        pb64 = user.get("photo_b64", "")
+        ini  = "".join([n[0] for n in user.get("full_name", "?").split()[:2]]).upper()
 
+        if pb64:
+            st.markdown(
+                f'<div class="profile-chip">'
+                f'<img src="data:image/jpeg;base64,{pb64}" '
+                f'style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid #3b82f6"/>'
+                f'<div><div class="pc-name">{user.get("full_name","")}</div>'
+                f'<div class="pc-post">{user.get("post","")}</div></div></div>',
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f'<div class="profile-chip">'
+                f'<div style="width:40px;height:40px;border-radius:50%;background:#3b82f6;'
+                f'display:flex;align-items:center;justify-content:center;'
+                f'font-size:16px;font-weight:700;color:#fff;flex-shrink:0">{ini}</div>'
+                f'<div><div class="pc-name">{user.get("full_name","")}</div>'
+                f'<div class="pc-post">{user.get("post","")}</div></div></div>',
+                unsafe_allow_html=True
+            )
+
+        st.markdown(
+            f'<div style="font-size:11px;color:#94a3b8;padding:0 4px 12px">'
+            f'{user.get("email","")}</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown("---")
+
+        # Alert badge count
+        all_alerts = load_alerts()
+        active_count = len([a for a in all_alerts if not a.get("dismissed")])
+        if active_count != st.session_state.last_alert_count:
+            if active_count > st.session_state.last_alert_count:
+                st.session_state.flash_active = True
+                play_alert_sound()
+            st.session_state.last_alert_count = active_count
+
+        selected = None
+        for p in pages:
+            label = p
+            if p == "🔔 Alerts" and active_count > 0:
+                label = f"{p}  🔴 {active_count}"
+            if st.button(label, key=f"nav_{p}", use_container_width=True):
+                st.session_state.nav_page = p
+                st.rerun()
+
+        st.markdown("---")
+        if st.button("🚪 Sign Out", use_container_width=True):
+            for k in ["logged_in", "user", "nav_page", "last_alert_count", "flash_active"]:
+                st.session_state[k] = False if k == "logged_in" else None if k in ["user","nav_page"] else 0
+            st.session_state.auth_page = "login"
+            st.rerun()
+
+    return st.session_state.nav_page
 # ── Main router ───────────────────────────────────────────────
 if not st.session_state.logged_in:
     if st.session_state.auth_page == "login": render_login()
