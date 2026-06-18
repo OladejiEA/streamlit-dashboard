@@ -6,3 +6,4 @@ matplotlib
 requests
 streamlit-cookies-controller
 flask
+psycopg2
