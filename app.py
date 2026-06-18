@@ -29,6 +29,33 @@ import io, time, base64, json
 import requests
 from streamlit_cookies_controller import CookieController
 
+from flask import Flask, request, jsonify, send_file, Response
+from datetime import datetime
+import os, hashlib, uuid, io, base64, csv as csv_mod, time
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+# Simple in-memory request throttle per IP
+_last_request_time = {}
+THROTTLE_SECONDS   = 2  # minimum gap per IP per endpoint
+
+def throttle_check():
+    ip  = request.remote_addr or "unknown"
+    key = f"{ip}:{request.path}"
+    now = time.time()
+    last = _last_request_time.get(key, 0)
+    if now - last < THROTTLE_SECONDS:
+        return jsonify({"error": "Too many requests"}), 429
+    _last_request_time[key] = now
+    return None
+
+@app.before_request
+def before_request():
+    # Only throttle GET requests to frequently-polled endpoints
+    if request.method == "GET" and request.path in ("/alerts", "/vitals"):
+        result = throttle_check()
+        if result:
+            return result
 st.set_page_config(page_title="VitaTrack", page_icon="🩺",
                    layout="wide", initial_sidebar_state="expanded")
 
