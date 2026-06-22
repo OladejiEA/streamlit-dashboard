@@ -179,7 +179,7 @@ def api(method, path, **kw):
 #  seconds across ALL reruns, completely eliminating 429 bursts.
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=8, show_spinner= False)
 def load_vitals(device_id=None):
     url = f"{FLASK_API_URL}/vitals" + (f"?device_id={device_id}" if device_id else "")
     try:
@@ -195,18 +195,18 @@ def load_vitals(device_id=None):
         pass
     return pd.DataFrame(columns=["Timestamp","Temperature","Blood Oxygen",
                                    "Heart Rate","Respiration Rate","Blood Pressure","Device ID"])
-
-@st.cache_data(ttl=10)
+    pass
+@st.cache_data(ttl=8, show_spinner = False)
 def fetch_alerts():
     r = api("GET", "/alerts")
     return r.json() if r and r.status_code == 200 else []
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=25)
 def fetch_patients():
     r = api("GET", "/admin/patients")
     return r.json() if r and r.status_code == 200 else []
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=25)
 def fetch_users():
     r = api("GET", "/admin/users")
     return r.json() if r and r.status_code == 200 else []
