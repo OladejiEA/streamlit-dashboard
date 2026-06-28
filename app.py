@@ -41,15 +41,15 @@ REFRESH_INTERVAL = 10
 POSTS = ["Doctor","Nurse","Paramedic","Lab Technician","Physiotherapist","Other"]
 
 ROLE_PAGES = {
-    "developer":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","👥 Admin Panel","⚙️ My Profile"],
+    "developer":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👥 Admin Panel","⚙️ My Profile"],
     "admin":           ["👥 Admin Panel","⚙️ My Profile"],
-    "doctor":          ["🏠 Home","🔔 Alerts","📥 Data Download","⚙️ My Profile"],
-    "nurse":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
-    "paramedic":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
-    "lab technician":  ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
-    "physiotherapist": ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
-    "other":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
-    "staff":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📥 Data Download","⚙️ My Profile"],
+    "doctor":          ["🏠 Home","🔔 Alerts","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
+    "nurse":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
+    "paramedic":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
+    "lab technician":  ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
+    "physiotherapist": ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
+    "other":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
+    "staff":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
 }
 
 def allowed_pages(user):
@@ -179,7 +179,7 @@ def api(method, path, **kw):
 #  seconds across ALL reruns, completely eliminating 429 bursts.
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=8, show_spinner= False)
+@st.cache_data(ttl=10)
 def load_vitals(device_id=None):
     url = f"{FLASK_API_URL}/vitals" + (f"?device_id={device_id}" if device_id else "")
     try:
@@ -195,20 +195,25 @@ def load_vitals(device_id=None):
         pass
     return pd.DataFrame(columns=["Timestamp","Temperature","Blood Oxygen",
                                    "Heart Rate","Respiration Rate","Blood Pressure","Device ID"])
-    pass
-@st.cache_data(ttl=8, show_spinner = False)
+
+@st.cache_data(ttl=10)
 def fetch_alerts():
     r = api("GET", "/alerts")
     return r.json() if r and r.status_code == 200 else []
 
-@st.cache_data(ttl=25)
+@st.cache_data(ttl=30)
 def fetch_patients():
     r = api("GET", "/admin/patients")
     return r.json() if r and r.status_code == 200 else []
 
-@st.cache_data(ttl=25)
+@st.cache_data(ttl=30)
 def fetch_users():
     r = api("GET", "/admin/users")
+    return r.json() if r and r.status_code == 200 else []
+
+@st.cache_data(ttl=15)
+def fetch_case_notes(patient_id: str):
+    r = api("GET", f"/case_notes?patient_id={patient_id}")
     return r.json() if r and r.status_code == 200 else []
 
 # FIX 2 — active_alerts() filters the already-cached fetch_alerts() result.
@@ -938,6 +943,160 @@ def page_profile():
                             st.error("Failed to update password.")
 
 
+def page_case_notes():
+    user = st.session_state.user
+    st.markdown("""<div class="header-bar"><div class="header-logo">📋</div>
+        <div><div class="header-title">Case Notes</div>
+        <div class="header-sub">Clinical observations and patient history</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    # ── Patient selector ──────────────────────────────────────────────────────
+    patient_list = fetch_patients()
+    if not patient_list:
+        st.info("No patients found. Add patients in the Admin Panel first.")
+        return
+
+    names    = {p["name"]: p for p in patient_list}
+    selected = st.selectbox("Select patient:", list(names.keys())) if len(names) > 1 \
+               else list(names.keys())[0]
+    pat      = names[selected]
+    pat_id   = pat["id"]
+
+    dev_tag = (f'<span class="pill pill-green">📡 {pat["device_id"]}</span>'
+               if pat.get("device_id") else '<span class="pill pill-yellow">No device</span>')
+    st.markdown(f"""<div class="patient-card">
+        <div class="patient-name">🧑‍⚕️ {pat['name']}</div>
+        <div class="patient-meta">Age: {pat.get('age','—')} · Gender: {pat.get('gender','—')}
+            · Diagnosis: {pat.get('diagnosis','—')} &nbsp;{dev_tag}</div>
+    </div>""", unsafe_allow_html=True)
+
+    # ── Write new note ────────────────────────────────────────────────────────
+    SEVERITY_COLORS = {
+        "Routine":  ("#16a34a", "#dcfce7"),
+        "Urgent":   ("#d97706", "#fef3c7"),
+        "Critical": ("#dc2626", "#fee2e2"),
+    }
+
+    with st.expander("✏️ Write New Case Note", expanded=True):
+        severity = st.selectbox("Severity", ["Routine", "Urgent", "Critical"])
+        note_text = st.text_area("Clinical observation / note",
+                                  placeholder="Enter your clinical observation here…",
+                                  height=130)
+
+        # Optional: attach latest vitals snapshot
+        attach_vitals = st.checkbox("Attach current vitals snapshot to this note")
+        vitals_snap = None
+        if attach_vitals:
+            df = load_vitals(pat.get("device_id"))
+            if not df.empty:
+                latest = df.iloc[-1]
+                snap = {}
+                for col in ["Temperature","Blood Oxygen","Heart Rate","Respiration Rate"]:
+                    v = latest.get(col)
+                    snap[col] = round(float(v), 1) if pd.notna(v) else "N/A"
+                snap["Timestamp"] = str(latest.get("Timestamp", ""))
+                vitals_snap = json.dumps(snap)
+                color, bg = "#2563eb", "#eff6ff"
+                st.markdown(f"""<div style="background:{bg};border-radius:8px;
+                    padding:10px 14px;font-size:13px;color:{color};margin-top:4px">
+                    <strong>Snapshot to attach:</strong><br>
+                    🌡️ Temp: {snap['Temperature']}°C &nbsp;|&nbsp;
+                    🫁 O₂: {snap['Blood Oxygen']}% &nbsp;|&nbsp;
+                    ❤️ HR: {snap['Heart Rate']} bpm &nbsp;|&nbsp;
+                    🌬️ Resp: {snap['Respiration Rate']} br/min
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.warning("No vitals data available to attach.")
+
+        col_save, col_gap = st.columns([2, 3])
+        with col_save:
+            if st.button("💾 Save Note", use_container_width=True, type="primary"):
+                if not note_text.strip():
+                    st.error("Please enter a note before saving.")
+                else:
+                    r = api("POST", "/case_notes", json={
+                        "patient_id":      pat_id,
+                        "staff_id":        user["id"],
+                        "staff_name":      user["full_name"],
+                        "note":            note_text.strip(),
+                        "severity":        severity,
+                        "vitals_snapshot": vitals_snap
+                    })
+                    if r and r.status_code == 201:
+                        fetch_case_notes.clear()
+                        st.success("✅ Case note saved.")
+                        st.rerun()
+                    else:
+                        err = r.json().get("error","Failed to save.") if r else "No response."
+                        st.error(err)
+
+    st.markdown("---")
+
+    # ── Display existing notes ────────────────────────────────────────────────
+    notes = fetch_case_notes(pat_id)
+
+    if not notes:
+        st.markdown("""<div style="text-align:center;padding:40px;color:#64748b">
+            <div style="font-size:40px">📋</div>
+            <div style="font-size:16px;font-weight:600;margin-top:10px">
+                No case notes yet for this patient</div>
+        </div>""", unsafe_allow_html=True)
+        return
+
+    st.markdown(f"#### {len(notes)} Note{'s' if len(notes)!=1 else ''} — {selected}")
+
+    for note in notes:
+        sev    = note.get("severity", "Routine")
+        color, bg = SEVERITY_COLORS.get(sev, ("#16a34a","#dcfce7"))
+        try:
+            ts = datetime.fromisoformat(note["created_at"]).strftime("%d %b %Y, %H:%M")
+        except Exception:
+            ts = note.get("created_at","")
+
+        # Vitals snapshot if present
+        snap_html = ""
+        if note.get("vitals_snapshot"):
+            try:
+                snap = json.loads(note["vitals_snapshot"])
+                snap_html = (
+                    f'<div style="background:#f8fafc;border-radius:6px;'
+                    f'padding:8px 12px;font-size:12px;color:#475569;margin-top:8px">'
+                    f'<strong>Attached vitals ({snap.get("Timestamp","")[:16]}):</strong> '
+                    f'🌡️ {snap.get("Temperature","—")}°C &nbsp;|&nbsp;'
+                    f'🫁 {snap.get("Blood Oxygen","—")}% &nbsp;|&nbsp;'
+                    f'❤️ {snap.get("Heart Rate","—")} bpm &nbsp;|&nbsp;'
+                    f'🌬️ {snap.get("Respiration Rate","—")} br/min</div>'
+                )
+            except Exception:
+                pass
+
+        note_col, del_col = st.columns([9, 1])
+        with note_col:
+            st.markdown(f"""<div style="background:#fff;border-radius:12px;
+                padding:16px 20px;box-shadow:0 2px 8px rgba(0,0,0,0.07);
+                margin-bottom:12px;border-left:5px solid {color}">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+                    <span style="background:{bg};color:{color};border-radius:999px;
+                        font-size:11px;font-weight:700;padding:3px 10px">{sev}</span>
+                    <span style="font-size:13px;font-weight:600;color:#0f172a">
+                        {note.get('staff_name','Unknown')}</span>
+                    <span style="font-size:12px;color:#94a3b8">{ts}</span>
+                </div>
+                <div style="font-size:14px;color:#1e293b;line-height:1.6;
+                    white-space:pre-wrap">{note.get('note','')}</div>
+                {snap_html}
+            </div>""", unsafe_allow_html=True)
+        with del_col:
+            st.markdown("<div style='margin-top:12px'>", unsafe_allow_html=True)
+            if st.button("🗑️", key=f"del_note_{note['id']}",
+                         help="Delete this note"):
+                r = api("DELETE", f"/case_notes/{note['id']}")
+                if r and r.status_code == 200:
+                    fetch_case_notes.clear()
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════════
 #  Router
 #  FIX 2 — active_count uses the already-cached fetch_alerts(); no double-fetch.
@@ -967,6 +1126,7 @@ else:
     if   page == "🏠 Home":           page_home()
     elif page == "🔔 Alerts":         page_alerts()
     elif page == "💉 BP Measurement": page_bp()
+    elif page == "📋 Case Notes":     page_case_notes()
     elif page == "📥 Data Download":  page_download()
     elif page == "👥 Admin Panel":    page_admin()
     elif page == "⚙️ My Profile":    page_profile()
