@@ -1,7 +1,7 @@
 """
 VitaTrack Streamlit Frontend
 Role-based page access:
-  developer   -> All pages + Admin Panel
+  developer   -> All pages + Admin Panel + Settings (Calibration)
   admin       -> Admin Panel only
   doctor      -> Home, Alerts, Data Download
   nurse/paramedic/lab technician/other -> Home, Alerts, BP Measurement, Data Download
@@ -18,10 +18,19 @@ Role-based page access:
      reruns every 10 s — the sidebar, alert count, and nav do NOT rerun.
   5. Admin mutations (approve, reject, save, etc.) call .clear() on the
      relevant cache before st.rerun() so stale data is never shown.
+
+FIXES IN THIS VERSION:
+  6. vitals_fragment: forward-fills NaN values before display so the last
+     known reading is always shown rather than "—".
+  7. Calibration tab added to Admin Panel (developer only). Accepts 5 device
+     readings + 5 expected readings, fits gain/offset via least squares, saves
+     to Flask /calibration endpoint (PostgreSQL), and applies to all subsequent
+     vitals display. Survives full system restarts.
 """
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime
@@ -41,15 +50,23 @@ REFRESH_INTERVAL = 10
 POSTS = ["Doctor","Nurse","Paramedic","Lab Technician","Physiotherapist","Other"]
 
 ROLE_PAGES = {
-    "developer":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👥 Admin Panel","⚙️ My Profile"],
-    "admin":           ["👥 Admin Panel","⚙️ My Profile"],
-    "doctor":          ["🏠 Home","🔔 Alerts","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
-    "nurse":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
-    "paramedic":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
-    "lab technician":  ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
-    "physiotherapist": ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
-    "other":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
-    "staff":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","⚙️ My Profile"],
+    "developer":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👥 Admin Panel","⚙️ Settings","👤 My Profile"],
+    "admin":           ["👥 Admin Panel","👤 My Profile"],
+    "doctor":          ["🏠 Home","🔔 Alerts","📋 Case Notes","📥 Data Download","👤 My Profile"],
+    "nurse":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👤 My Profile"],
+    "paramedic":       ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👤 My Profile"],
+    "lab technician":  ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👤 My Profile"],
+    "physiotherapist": ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👤 My Profile"],
+    "other":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👤 My Profile"],
+    "staff":           ["🏠 Home","🔔 Alerts","💉 BP Measurement","📋 Case Notes","📥 Data Download","👤 My Profile"],
+}
+
+# Calibration parameters — maps display column name → Flask parameter key
+CALIB_PARAMS = {
+    "Temperature":      "temperature",
+    "Blood Oxygen":     "blood_oxygen",
+    "Heart Rate":       "heart_rate",
+    "Respiration Rate": "respiration_rate",
 }
 
 def allowed_pages(user):
@@ -133,6 +150,9 @@ section[data-testid="stSidebar"] hr{border-color:#1e293b !important;}
 .admin-table td{padding:10px 14px;border-bottom:1px solid #f1f5f9;}
 .role-badge{display:inline-block;background:#e0f2fe;color:#0369a1;border-radius:6px;
     font-size:11px;font-weight:700;padding:2px 8px;margin-left:6px;}
+.calib-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;
+    padding:16px 20px;margin-bottom:16px;}
+.calib-active{background:#f0fdf4;border-color:#86efac;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -166,7 +186,7 @@ if not st.session_state._session_restored:
         st.session_state.nav_page  = allowed_pages(restored)[0]
         st.rerun()
 
-# ─── Raw API helper (no caching — use the cached wrappers below) ──────────────────
+# ─── Raw API helper ───────────────────────────────────────────────────────────────
 def api(method, path, **kw):
     try:
         return requests.request(method, f"{FLASK_API_URL}{path}", timeout=10, **kw)
@@ -174,9 +194,7 @@ def api(method, path, **kw):
         return None
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-#  FIX 1 — Cached data-fetching functions
-#  @st.cache_data(ttl=N) means a real HTTP request fires at most once every N
-#  seconds across ALL reruns, completely eliminating 429 bursts.
+#  Cached data-fetching functions
 # ═══════════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=10)
@@ -216,12 +234,16 @@ def fetch_case_notes(patient_id: str):
     r = api("GET", f"/case_notes?patient_id={patient_id}")
     return r.json() if r and r.status_code == 200 else []
 
-# FIX 2 — active_alerts() filters the already-cached fetch_alerts() result.
-# No extra HTTP request is ever made.
+@st.cache_data(ttl=60)
+def fetch_calibration(device_id: str):
+    """Fetch gain/offset for all parameters for a device. Cached 60s."""
+    r = api("GET", f"/calibration?device_id={device_id}")
+    return r.json() if r and r.status_code == 200 else {}
+
 def active_alerts():
     return [a for a in fetch_alerts() if not a.get("dismissed")]
 
-# ─── Alert mutation helpers (clear cache so next read is fresh) ───────────────────
+# ─── Alert mutation helpers ───────────────────────────────────────────────────────
 def save_alert_remote(msg):
     api("POST", "/alerts", json={"message": msg})
     fetch_alerts.clear()
@@ -234,14 +256,9 @@ def clear_alerts_remote():
     api("POST", "/alerts/clear")
     fetch_alerts.clear()
 
-# ═══════════════════════════════════════════════════════════════════════════════════
-#  FIX 3 — Cached photo fetching
-#  Each staff photo is fetched once per session and cached indefinitely.
-# ═══════════════════════════════════════════════════════════════════════════════════
-
+# ─── Cached photo fetching ────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def get_photo_b64(uid: int) -> str | None:
-    """Return base64-encoded JPEG for a user photo, or None on failure."""
     try:
         r = requests.get(f"{FLASK_API_URL}/auth/photo/{uid}", timeout=5)
         if r.status_code == 200:
@@ -260,6 +277,35 @@ def get_photo_html(uid, size=54, border="#3b82f6", name=""):
     return (f'<div style="width:{size}px;height:{size}px;border-radius:50%;background:{border};'
             f'display:inline-flex;align-items:center;justify-content:center;'
             f'font-size:{size//3}px;font-weight:700;color:#fff">{ini}</div>')
+
+# ─── Calibration helpers ──────────────────────────────────────────────────────────
+
+def fit_calibration(device_readings: list, expected_readings: list):
+    """
+    Least-squares linear fit: expected = gain * device + offset
+    Returns (gain, offset).
+    """
+    x = np.array(device_readings, dtype=float)
+    y = np.array(expected_readings, dtype=float)
+    # Normal equations for y = gain*x + offset
+    A = np.vstack([x, np.ones(len(x))]).T
+    gain, offset = np.linalg.lstsq(A, y, rcond=None)[0]
+    return float(gain), float(offset)
+
+def apply_calibration(df: pd.DataFrame, calib: dict) -> pd.DataFrame:
+    """
+    Apply gain/offset calibration to a vitals dataframe in-place.
+    calib = {"temperature": {"gain": 1.02, "offset": -0.5}, ...}
+    """
+    df = df.copy()
+    col_map = {v: k for k, v in CALIB_PARAMS.items()}  # flask_key -> display col
+    for flask_key, vals in calib.items():
+        col = col_map.get(flask_key)
+        if col and col in df.columns:
+            gain   = vals.get("gain",   1.0)
+            offset = vals.get("offset", 0.0)
+            df[col] = df[col] * gain + offset
+    return df
 
 # ─── Chart helpers ────────────────────────────────────────────────────────────────
 CHART_CFG = {
@@ -416,20 +462,33 @@ def render_sidebar(pages, active_count):
     return page
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-#  FIX 4 — st.fragment isolates the auto-refresh loop
-#  Only the vitals section reruns every 10 s; the sidebar, nav, and alert count
-#  are NOT re-executed, eliminating the per-rerun API call cascade.
+#  FIX 4+6 — vitals fragment with forward-fill so last known value always shows
 # ═══════════════════════════════════════════════════════════════════════════════════
 
 @st.fragment(run_every=REFRESH_INTERVAL)
 def vitals_fragment(device_id):
-    df = load_vitals(device_id)   # served from cache; real HTTP fires at most once per 10 s
+    df = load_vitals(device_id)
     if df.empty:
         st.warning("No vitals data yet. Waiting for sensor data…")
         return
 
+    # ── Apply calibration if a device is assigned ─────────────────────────────
+    if device_id:
+        calib = fetch_calibration(device_id)
+        if calib:
+            df = apply_calibration(df, calib)
+
+    # FIX 6: Forward-fill NaN so the last known reading persists on display.
+    # This means if the hub sends N/A for a value, we show the previous reading
+    # rather than a blank dash.
+    vital_cols = ["Temperature", "Blood Oxygen", "Heart Rate", "Respiration Rate"]
+    for col in vital_cols:
+        if col in df.columns:
+            df[col] = df[col].ffill()
+
     display_df = df.tail(10)
     latest     = display_df.iloc[-1]
+
     st.markdown(
         f'<div class="last-updated">Last updated: {datetime.now().strftime("%d %b %Y, %H:%M:%S")}</div>',
         unsafe_allow_html=True
@@ -493,7 +552,7 @@ def page_home():
         <div class="header-sub">Real-time Patient Vital Signs Monitoring</div></div>
     </div>""", unsafe_allow_html=True)
 
-    patient_list = fetch_patients()   # cached
+    patient_list = fetch_patients()
     device_id    = None
 
     if patient_list:
@@ -509,7 +568,6 @@ def page_home():
                 · Diagnosis: {pat.get('diagnosis','—')} &nbsp;{dev_tag}</div>
         </div>""", unsafe_allow_html=True)
 
-    # FIX 4: vitals_fragment handles its own timed rerun — no time.sleep / st.rerun() needed here
     vitals_fragment(device_id)
 
 
@@ -519,7 +577,7 @@ def page_alerts():
         <div class="header-sub">Triggered vital sign alerts</div></div>
     </div>""", unsafe_allow_html=True)
 
-    alerts    = fetch_alerts()   # cached
+    alerts    = fetch_alerts()
     active    = [a for a in alerts if not a.get("dismissed")]
     dismissed = len(alerts) - len(active)
 
@@ -527,7 +585,7 @@ def page_alerts():
     c1.markdown(f"**{len(active)} active** · {dismissed} dismissed")
     with c2:
         if st.button("Clear All", use_container_width=True):
-            clear_alerts_remote()   # also calls fetch_alerts.clear()
+            clear_alerts_remote()
             st.rerun()
 
     st.markdown("---")
@@ -555,7 +613,7 @@ def page_alerts():
             </div>""", unsafe_allow_html=True)
         with cb:
             if st.button("Dismiss", key=f"d_{a['id']}"):
-                dismiss_alert_remote(a["id"])   # also calls fetch_alerts.clear()
+                dismiss_alert_remote(a["id"])
                 st.rerun()
 
 
@@ -588,7 +646,7 @@ def page_bp():
                 "blood_pressure": f"{systolic}/{diastolic}"
             })
             if r and r.status_code == 200:
-                load_vitals.clear()   # invalidate vitals cache after new data
+                load_vitals.clear()
                 st.success(f"BP {systolic}/{diastolic} mmHg saved!")
                 if systolic >= 140 or diastolic >= 90:
                     save_alert_remote(f"High BP: {systolic}/{diastolic} mmHg")
@@ -606,7 +664,7 @@ def page_bp():
         <tr><td style="color:#ea580c;font-weight:600">High Stage 1</td><td>130-139</td><td>80-89</td></tr>
         <tr><td style="color:#dc2626;font-weight:600">High Stage 2</td><td>>=140</td><td>>=90</td></tr>
         </table>""", unsafe_allow_html=True)
-        df = load_vitals()   # cached
+        df = load_vitals()
         if not df.empty and "Blood Pressure" in df.columns and df["Blood Pressure"].notna().any():
             last_bp = df["Blood Pressure"].dropna().iloc[-1]
             st.markdown(f"""<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:10px;
@@ -621,7 +679,7 @@ def page_download():
         <div class="header-sub">Export vitals and alerts as CSV</div></div>
     </div>""", unsafe_allow_html=True)
 
-    df = load_vitals()   # cached
+    df = load_vitals()
     if df.empty:
         st.warning("No data available yet.")
         return
@@ -641,7 +699,7 @@ def page_download():
     c1.download_button("Download Vitals CSV", df.to_csv(index=False).encode(),
                         f"vitatrack_vitals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         "text/csv", use_container_width=True)
-    alerts = fetch_alerts()   # cached
+    alerts = fetch_alerts()
     if alerts:
         al_df = pd.DataFrame(alerts)
         c2.download_button("Download Alerts Log", al_df.to_csv(index=False).encode(),
@@ -657,9 +715,8 @@ def page_admin():
 
     tab1, tab2, tab3 = st.tabs(["👤 Staff Management","🧑‍⚕️ Patients","📡 Devices"])
 
-    # ── Tab 1: Staff ──────────────────────────────────────────────────────────
     with tab1:
-        users = fetch_users()   # cached
+        users = fetch_users()
         if not users:
             st.error("Could not load users.")
             return
@@ -679,7 +736,6 @@ def page_admin():
                         st.caption(u["email"])
                         st.caption(f"Registered: {u.get('created_at','')[:10]}")
                     with ca:
-                        # FIX 5 — clear user cache before rerun after mutations
                         if st.button("Approve", key=f"app_{u['id']}", use_container_width=True):
                             api("POST", f"/admin/approve/{u['id']}")
                             fetch_users.clear()
@@ -706,10 +762,9 @@ def page_admin():
                                 unsafe_allow_html=True)
                     st.caption(u["email"])
 
-    # ── Tab 2: Patients ───────────────────────────────────────────────────────
     with tab2:
-        patients  = fetch_patients()   # cached
-        all_users = fetch_users()      # cached
+        patients  = fetch_patients()
+        all_users = fetch_users()
         all_staff = [u for u in all_users if u.get("approved")]
 
         st.markdown("#### Add New Patient")
@@ -770,11 +825,10 @@ def page_admin():
                         st.success("Saved!")
                         st.rerun()
 
-    # ── Tab 3: Devices ────────────────────────────────────────────────────────
     with tab3:
         rd       = api("GET", "/admin/devices")
         devices  = rd.json() if rd and rd.status_code == 200 else []
-        patients2 = fetch_patients()   # cached
+        patients2 = fetch_patients()
 
         st.markdown("#### Register New Device")
         with st.expander("Add a device", expanded=not bool(devices)):
@@ -834,11 +888,191 @@ def page_admin():
                             st.info("Select a patient first.")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+#  SETTINGS PAGE — Device Calibration (developer only)
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+def page_settings():
+    st.markdown("""<div class="header-bar"><div class="header-logo">⚙️</div>
+        <div><div class="header-title">Settings</div>
+        <div class="header-sub">Device calibration — developer only</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    # ── Device selector ───────────────────────────────────────────────────────
+    rd = api("GET", "/admin/devices")
+    devices = rd.json() if rd and rd.status_code == 200 else []
+    if not devices:
+        st.warning("No devices registered yet. Register devices in the Admin Panel first.")
+        return
+
+    dev_ids   = [d["device_id"] for d in devices]
+    device_id = st.selectbox("Select device to calibrate", dev_ids)
+
+    # Load existing calibration for this device
+    existing = fetch_calibration(device_id)
+
+    st.markdown("---")
+
+    # ── Current calibration status ────────────────────────────────────────────
+    st.markdown("#### Current Calibration")
+    if existing:
+        col_map = {v: k for k, v in CALIB_PARAMS.items()}
+        has_any = False
+        status_cols = st.columns(len(CALIB_PARAMS))
+        for i, (flask_key, display_name) in enumerate(
+            [(v, k) for k, v in CALIB_PARAMS.items()]
+        ):
+            vals = existing.get(flask_key)
+            with status_cols[i]:
+                if vals:
+                    has_any = True
+                    g = vals["gain"]; o = vals["offset"]
+                    sign = "+" if o >= 0 else "−"
+                    st.markdown(f"""<div class="calib-box calib-active">
+                        <div style="font-size:12px;font-weight:700;color:#16a34a;
+                            text-transform:uppercase;letter-spacing:.5px">✓ {display_name}</div>
+                        <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:4px">
+                            ×{g:.4f}</div>
+                        <div style="font-size:13px;color:#475569">
+                            offset {sign} {abs(o):.4f}</div>
+                        <div style="font-size:11px;color:#94a3b8;margin-top:4px">
+                            adjusted = reading × {g:.4f} {sign} {abs(o):.4f}</div>
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""<div class="calib-box">
+                        <div style="font-size:12px;font-weight:700;color:#94a3b8;
+                            text-transform:uppercase;letter-spacing:.5px">{display_name}</div>
+                        <div style="font-size:14px;color:#94a3b8;margin-top:6px">Not calibrated</div>
+                    </div>""", unsafe_allow_html=True)
+        if not has_any:
+            st.info("No calibration saved for this device yet.")
+    else:
+        st.info("No calibration saved for this device yet.")
+
+    st.markdown("---")
+
+    # ── New calibration entry ─────────────────────────────────────────────────
+    st.markdown("#### Calibrate a Parameter")
+    st.markdown(
+        "Enter 5 raw device readings alongside the 5 corresponding expected (reference) "
+        "values. The system fits a linear correction: **adjusted = gain × reading + offset**. "
+        "This is saved to the database and applied automatically to all future readings — "
+        "even after a full system restart."
+    )
+
+    param_display = st.selectbox("Parameter to calibrate", list(CALIB_PARAMS.keys()))
+    flask_key     = CALIB_PARAMS[param_display]
+
+    st.markdown(f"##### Enter 5 paired readings for **{param_display}**")
+
+    header_cols = st.columns([1, 3, 3])
+    header_cols[0].markdown("**#**")
+    header_cols[1].markdown("**Device reading** *(raw)*")
+    header_cols[2].markdown("**Expected value** *(reference)*")
+
+    device_readings   = []
+    expected_readings = []
+
+    # Sensible defaults per parameter to guide the developer
+    defaults = {
+        "Temperature":      (36.5, 36.5),
+        "Blood Oxygen":     (95.0, 98.0),
+        "Heart Rate":       (72.0, 72.0),
+        "Respiration Rate": (15.0, 15.0),
+    }
+    d_def, e_def = defaults[param_display]
+
+    for i in range(5):
+        r1, r2, r3 = st.columns([1, 3, 3])
+        r1.markdown(f"<div style='padding-top:32px;font-weight:600;color:#64748b'>{i+1}</div>",
+                    unsafe_allow_html=True)
+        dv = r2.number_input("", value=d_def, key=f"dev_{param_display}_{i}",
+                              label_visibility="collapsed", format="%.2f")
+        ev = r3.number_input("", value=e_def, key=f"exp_{param_display}_{i}",
+                              label_visibility="collapsed", format="%.2f")
+        device_readings.append(dv)
+        expected_readings.append(ev)
+
+    # Live preview of the fit
+    try:
+        gain, offset = fit_calibration(device_readings, expected_readings)
+        sign = "+" if offset >= 0 else "−"
+        st.markdown(f"""<div style="background:#eff6ff;border:1px solid #bfdbfe;
+            border-radius:10px;padding:14px 18px;margin:12px 0;font-size:14px;color:#1d4ed8">
+            <strong>Preview:</strong> adjusted = <strong>{gain:.4f}</strong>
+            × reading {sign} <strong>{abs(offset):.4f}</strong>
+            &nbsp;·&nbsp; e.g. a reading of {d_def:.1f} →
+            <strong>{gain * d_def + offset:.2f}</strong>
+        </div>""", unsafe_allow_html=True)
+    except Exception:
+        gain, offset = 1.0, 0.0
+        st.warning("Could not compute fit — check that readings are not all identical.")
+
+    save_col, reset_col = st.columns([2, 1])
+    with save_col:
+        if st.button(f"💾 Save Calibration for {param_display}",
+                     use_container_width=True, type="primary"):
+            r = api("POST", "/calibration", json={
+                "device_id":    device_id,
+                "calibrations": {flask_key: {"gain": gain, "offset": offset}}
+            })
+            if r and r.status_code == 200:
+                fetch_calibration.clear()
+                st.success(
+                    f"✅ Calibration saved for {param_display} on {device_id}. "
+                    f"Applied immediately to all readings."
+                )
+                st.rerun()
+            else:
+                err = r.json().get("error","Failed.") if r else "No response from server."
+                st.error(err)
+
+    with reset_col:
+        if st.button(f"🔄 Reset {param_display}", use_container_width=True):
+            # Reset = save gain=1, offset=0 (identity transform)
+            r = api("POST", "/calibration", json={
+                "device_id":    device_id,
+                "calibrations": {flask_key: {"gain": 1.0, "offset": 0.0}}
+            })
+            if r and r.status_code == 200:
+                fetch_calibration.clear()
+                st.success(f"Calibration for {param_display} reset to identity (no correction).")
+                st.rerun()
+            else:
+                st.error("Reset failed.")
+
+    # ── How it works ──────────────────────────────────────────────────────────
+    with st.expander("ℹ️ How calibration works"):
+        st.markdown("""
+**Method:** Ordinary least-squares linear regression on your 5 paired readings.
+
+Given device readings **x** and expected values **y**, the system solves:
+
+> **y = gain × x + offset**
+
+for the best-fit `gain` and `offset` that minimise the mean squared error
+across all 5 pairs.
+
+**Persistence:** Gain and offset are stored in the PostgreSQL database under
+the `/calibration` endpoint. They are fetched at display time and applied to
+every vitals reading shown on the Home page. Restarting the system, the
+Streamlit app, or the Flask backend does not lose calibration — it is always
+re-read from the database.
+
+**Applying:** The correction is applied in the display layer only. Raw values
+are stored as-is in the database. If you re-calibrate, the new correction
+applies to all future displays immediately.
+
+**Reset:** Setting gain = 1.0 and offset = 0.0 is the identity transform —
+readings pass through unchanged.
+        """)
+
+
 def page_profile():
     user = st.session_state.user
     st.markdown("""
     <div class="header-bar">
-        <div class="header-logo">⚙️</div>
+        <div class="header-logo">👤</div>
         <div><div class="header-title">My Profile</div>
         <div class="header-sub">Update your password and profile photo</div></div>
     </div>""", unsafe_allow_html=True)
@@ -879,7 +1113,7 @@ def page_profile():
                     r = api("POST", "/profile/change_photo",
                             json={"user_id": user["id"], "photo_b64": photo_b64})
                     if r and r.status_code == 200:
-                        get_photo_b64.clear()   # bust the photo cache so new image shows
+                        get_photo_b64.clear()
                         st.success("✅ Profile photo updated! Refresh to see it in the sidebar.")
                     else:
                         try:
@@ -950,7 +1184,6 @@ def page_case_notes():
         <div class="header-sub">Clinical observations and patient history</div></div>
     </div>""", unsafe_allow_html=True)
 
-    # ── Patient selector ──────────────────────────────────────────────────────
     patient_list = fetch_patients()
     if not patient_list:
         st.info("No patients found. Add patients in the Admin Panel first.")
@@ -970,7 +1203,6 @@ def page_case_notes():
             · Diagnosis: {pat.get('diagnosis','—')} &nbsp;{dev_tag}</div>
     </div>""", unsafe_allow_html=True)
 
-    # ── Write new note ────────────────────────────────────────────────────────
     SEVERITY_COLORS = {
         "Routine":  ("#16a34a", "#dcfce7"),
         "Urgent":   ("#d97706", "#fef3c7"),
@@ -982,8 +1214,6 @@ def page_case_notes():
         note_text = st.text_area("Clinical observation / note",
                                   placeholder="Enter your clinical observation here…",
                                   height=130)
-
-        # Optional: attach latest vitals snapshot
         attach_vitals = st.checkbox("Attach current vitals snapshot to this note")
         vitals_snap = None
         if attach_vitals:
@@ -1032,9 +1262,7 @@ def page_case_notes():
 
     st.markdown("---")
 
-    # ── Display existing notes ────────────────────────────────────────────────
     notes = fetch_case_notes(pat_id)
-
     if not notes:
         st.markdown("""<div style="text-align:center;padding:40px;color:#64748b">
             <div style="font-size:40px">📋</div>
@@ -1053,7 +1281,6 @@ def page_case_notes():
         except Exception:
             ts = note.get("created_at","")
 
-        # Vitals snapshot if present
         snap_html = ""
         if note.get("vitals_snapshot"):
             try:
@@ -1088,8 +1315,7 @@ def page_case_notes():
             </div>""", unsafe_allow_html=True)
         with del_col:
             st.markdown("<div style='margin-top:12px'>", unsafe_allow_html=True)
-            if st.button("🗑️", key=f"del_note_{note['id']}",
-                         help="Delete this note"):
+            if st.button("🗑️", key=f"del_note_{note['id']}", help="Delete this note"):
                 r = api("DELETE", f"/case_notes/{note['id']}")
                 if r and r.status_code == 200:
                     fetch_case_notes.clear()
@@ -1099,7 +1325,6 @@ def page_case_notes():
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 #  Router
-#  FIX 2 — active_count uses the already-cached fetch_alerts(); no double-fetch.
 # ═══════════════════════════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
     if st.session_state.auth_page == "login":
@@ -1112,7 +1337,6 @@ else:
     if st.session_state.nav_page not in pages:
         st.session_state.nav_page = pages[0]
 
-    # Single cached call — active_alerts() filters it, no extra HTTP request
     all_alerts   = fetch_alerts()
     active_count = len([a for a in all_alerts if not a.get("dismissed")])
 
@@ -1129,4 +1353,5 @@ else:
     elif page == "📋 Case Notes":     page_case_notes()
     elif page == "📥 Data Download":  page_download()
     elif page == "👥 Admin Panel":    page_admin()
-    elif page == "⚙️ My Profile":    page_profile()
+    elif page == "⚙️ Settings":       page_settings()
+    elif page == "👤 My Profile":     page_profile()
