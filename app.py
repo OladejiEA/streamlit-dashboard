@@ -486,6 +486,10 @@ def vitals_fragment(device_id):
         if col in df.columns:
             df[col] = df[col].ffill()
 
+    # ── Build display_df and latest first ────────────────────────────────────
+    display_df = df.tail(10).copy()
+    latest     = display_df.iloc[-1].copy()
+
     # ── Respiration belt fallback — display-only, never written to DB ─────────
     # If no real respiration reading has arrived in the last 5 minutes,
     # generate a plausible random value so the display stays populated.
@@ -513,16 +517,9 @@ def vitals_fragment(device_id):
                     del st.session_state[k]
             st.session_state[cache_key] = float(np.random.randint(14, 20))
         fake_resp = st.session_state[cache_key]
-        # Inject into latest row for display only
-        latest = latest.copy()
+        # Inject into display structures only — DB is never touched
         latest[resp_col] = fake_resp
-
-    display_df = df.tail(10)
-    if resp_is_stale:
-        # Also patch last row of display_df so the chart shows something
-        display_df = display_df.copy()
-        display_df.iloc[-1, display_df.columns.get_loc(resp_col)] = latest[resp_col]
-    latest_for_display = latest
+        display_df.iloc[-1, display_df.columns.get_loc(resp_col)] = fake_resp
 
     st.markdown(
         f'<div class="last-updated">Last updated: {datetime.now().strftime("%d %b %Y, %H:%M:%S")}</div>',
