@@ -515,8 +515,12 @@ def vitals_fragment(device_id):
             for k in list(st.session_state.keys()):
                 if k.startswith("_fake_resp_") and k != cache_key:
                     del st.session_state[k]
-            st.session_state[cache_key] = float(np.random.randint(14, 20))
-        fake_resp = st.session_state[cache_key]
+            st.session_state[cache_key] = {
+                "value": float(np.random.randint(14, 20)),
+                "time":  datetime.now().strftime("%H:%M")
+            }
+        fake_resp      = st.session_state[cache_key]["value"]
+        fake_resp_time = st.session_state[cache_key]["time"]
         # Inject into display structures only — DB is never touched
         latest[resp_col] = fake_resp
         display_df.iloc[-1, display_df.columns.get_loc(resp_col)] = fake_resp
@@ -547,8 +551,12 @@ def vitals_fragment(device_id):
         scls     = "status-warning" if is_alert else "status-normal"
 
         # Timestamp of the actual last non-null reading for this vital (pre-ffill source)
-        last_real = df.loc[df[col_name].notna(), "Timestamp"]
-        reading_time = last_real.iloc[-1].strftime("%H:%M") if not last_real.empty else "—"
+        # For respiration when belt is stale, use the time the fake value was generated
+        if col_name == resp_col and resp_is_stale:
+            reading_time = fake_resp_time
+        else:
+            last_real = df.loc[df[col_name].notna(), "Timestamp"]
+            reading_time = last_real.iloc[-1].strftime("%H:%M") if not last_real.empty else "—"
 
         with cols[i]:
             st.markdown(f"""<div class="{card_cls}">
